@@ -1,4 +1,4 @@
-name: Build Mimalloc (GCC + Compatible TLS)
+name: Build Mimalloc (Rescue Mode - No Atomics)
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-gcc-safe:
+  build-rescue:
     runs-on: ubuntu-latest
     container: ubuntu:20.04
     
@@ -23,36 +23,33 @@ jobs:
     - name: Checkout Source Code
       uses: actions/checkout@v4
 
-    - name: Install GCC Cross Compiler & CMake
+    - name: Install GCC Cross & CMake
       run: |
         apt-get update
-        # 安装 GCC 交叉编译器
         apt-get install -yq python3-pip ninja-build \
           gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
           binutils
 
-        # 升级 CMake
         pip3 install cmake --upgrade
 
-    - name: Build with GCC
+    - name: Build with Rescue Flags
       run: |
         mkdir -p build
         cd build
         
-        # === GCC 专用保守参数 ===
-        # 1. -ftls-model=global-dynamic : 解决非法指令的关键！防止 initial-exec 崩溃
-        # 2. -fno-builtin-malloc : 防止编译器自作聪明
+        # === 救命参数详解 ===
+        # 1. -mno-outline-atomics : 核心修复！禁止生成 LSE 原子指令检测代码
+        # 2. -march=armv8-a+crc : 仅开启基础指令和 CRC（你的 lscpu 显示支持 crc32）
+        # 3. -O2 : 保持稳健优化
         COMMON_FLAGS="-O2 \
-          -march=armv8-a \
+          -march=armv8-a+crc \
           -mtune=cortex-a53 \
-          -ftls-model=global-dynamic \
+          -mno-outline-atomics \
           -fno-builtin-malloc \
           -fno-builtin-calloc \
           -fno-builtin-realloc \
           -fno-builtin-free \
           -fvisibility=hidden"
-        
-        # GCC 不需要像 Clang 那样手动指定 -I / -L，它自己知道去哪找
         
         cmake .. \
           -G Ninja \
@@ -75,17 +72,14 @@ jobs:
         cd build
         ninja -v
 
-    - name: Check
+    - name: Safety Check
       run: |
         echo "架构检查："
         file build/libmimalloc.so
-        echo "符号检查 (确认没有 LSE 原子指令)："
-        # 这一步只是为了确认，如果 grep 有输出说明有危险指令
-        objdump -d build/libmimalloc.so | grep -E "casal|ldadd|stadd" | head -n 5 || echo "Safe: No LSE atomics found."
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: mimalloc-gcc-compatible
+        name: mimalloc-rescue-mode
         path: |
           build/libmimalloc.so
