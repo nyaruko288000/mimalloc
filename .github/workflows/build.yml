@@ -1,4 +1,4 @@
-name: Build Mimalloc (GLIBC 2.31 + New CMake)
+name: Build Mimalloc (Clang Cross Fix)
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-legacy:
+  build-legacy-fixed:
     runs-on: ubuntu-latest
     container: ubuntu:20.04
     
@@ -26,24 +26,24 @@ jobs:
     - name: Install Build Tools & Upgrade CMake
       run: |
         apt-get update
-        # 1. 安装 Python pip 和编译工具 (注意：这里不安装 apt 里的 cmake)
+        # 1. 显式安装 libc6-dev-arm64-cross 确保头文件绝对存在
         apt-get install -yq python3-pip clang lld ninja-build \
           gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-          binutils
+          libc6-dev-arm64-cross binutils
 
-        # 2. 使用 pip 安装最新版 CMake (这一步解决了 3.16 版本过低的问题)
+        # 2. 升级 CMake
         pip3 install cmake --upgrade
-        
-        # 3. 验证版本
-        echo "CMake Version:"
-        cmake --version
 
     - name: Build with CMake
       run: |
         mkdir -p build
         cd build
         
-        COMMON_FLAGS="-O3 -mcpu=cortex-a53 -mtune=cortex-a53 \
+        # === 核心修复 ===
+        # 1. -I/usr/aarch64-linux-gnu/include : 手动指定 ARM 头文件路径，解决 "bits/libc-header-start.h not found"
+        # 2. 移除了 polly (以防万一)，保留 cortex-a53 优化
+        COMMON_FLAGS="-I/usr/aarch64-linux-gnu/include \
+          -O3 -mcpu=cortex-a53 -mtune=cortex-a53 \
           -flto=full \
           -fstack-protector-strong \
           -funroll-loops \
@@ -57,7 +57,11 @@ jobs:
         MY_C_FLAGS="$COMMON_FLAGS -std=gnu17"
         MY_CXX_FLAGS="$COMMON_FLAGS"
           
-        MY_LDFLAGS="-flto=full -fuse-ld=lld -Wl,-O3 -Wl,--icf=all -Wl,-z,relro,-z,now -s"
+        # === 链接修复 ===
+        # -L/usr/aarch64-linux-gnu/lib : 手动指定库路径，替代 --sysroot，防止路径重叠报错
+        MY_LDFLAGS="-L/usr/aarch64-linux-gnu/lib \
+          -flto=full -fuse-ld=lld \
+          -Wl,-O3 -Wl,--icf=all -Wl,-z,relro,-z,now -s"
 
         cmake .. \
           -G Ninja \
@@ -83,16 +87,16 @@ jobs:
         cd build
         ninja -v
 
-    - name: Verify GLIBC & Arch
+    - name: Verify
       run: |
-        echo "=== GLIBC Requirement (Should satisfy GLIBC 2.31) ==="
+        echo "=== GLIBC Requirement ==="
         objdump -p build/libmimalloc.so | grep "GLIBC_2." | sort -u
-        echo "=== Architecture (Should be aarch64) ==="
+        echo "=== Architecture ==="
         file build/libmimalloc.so
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: mimalloc-glibc2.31-compatible
+        name: mimalloc-glibc2.31-fixed
         path: |
           build/libmimalloc.so
