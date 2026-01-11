@@ -1,0 +1,107 @@
+name: Build Mimalloc for Cortex-A53 (Clang+Polly)
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-24.04 # 使用较新的环境以获取新版 Clang
+    
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+
+    - name: Install Dependencies (Clang, LLD, ARM64 Cross-chain)
+      run: |
+        sudo apt-get update
+        # 安装 Clang, LLD 链接器, Ninja 构建工具
+        # 安装 gcc-aarch64-linux-gnu 是为了提供 ARM 的系统头文件(sysroot)和标准库
+        sudo apt-get install -y clang lld ninja-build cmake gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+    - name: Configure CMake
+      env:
+        # 定义交叉编译目标
+        TARGET_TRIPLE: "aarch64-linux-gnu"
+        
+        # 链接器参数 (包含您指定的所有优化)
+        # 注意: 即使是交叉编译，-fuse-ld=lld 也是通用的
+        LDFLAGS: >-
+          -flto=full 
+          -fuse-ld=lld 
+          -Wl,-O3 
+          -Wl,--icf=all 
+          -Wl,-z,relro,-z,now 
+          -s
+          --target=aarch64-linux-gnu
+
+        # 编译器参数
+        # 1. 将 -march=native 修改为 -mcpu=cortex-a53 以适配目标架构
+        # 2. 保留了您所有的 Polly、Unroll 和 LTO 优化
+        # 3. 显式指定 --target 和 --sysroot 确保 Clang 找到 ARM 的头文件
+        CFLAGS: >-
+          --target=aarch64-linux-gnu
+          --sysroot=/usr/aarch64-linux-gnu
+          -std=gnu17 
+          -O3 
+          -mcpu=cortex-a53
+          -mtune=cortex-a53
+          -flto=full 
+          -fstack-protector-strong 
+          -funroll-loops 
+          -fno-plt 
+          -fomit-frame-pointer 
+          -DNDEBUG 
+          -fvisibility=hidden 
+          -fvisibility-inlines-hidden 
+          -falign-functions=32 
+          -fno-semantic-interposition 
+          -fno-math-errno 
+          -mllvm -polly 
+          -mllvm -polly-vectorizer=stripmine 
+          -mllvm -inline-threshold=1200 
+          -mllvm -unroll-threshold=400 
+          -mllvm -enable-loop-distribute 
+          -Wno-unused-command-line-argument
+
+      run: |
+        # 创建构建目录
+        mkdir -p build
+        cd build
+        
+        # 运行 CMake
+        # 我们显式告诉 CMake 使用 Clang，并指定系统处理器为 aarch64
+        cmake .. \
+          -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_C_COMPILER=clang \
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_SYSTEM_NAME=Linux \
+          -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+          -DMI_BUILD_TESTS=OFF \
+          -DMI_BUILD_SHARED=ON \
+          -DMI_BUILD_STATIC=ON \
+          -DMI_OVERRIDE=ON
+
+    - name: Build
+      run: |
+        cd build
+        ninja -v
+
+    - name: List Output Files (Verification)
+      run: |
+        echo "Build complete. Listing files:"
+        ls -lh build/
+        echo "Checking file architecture (Should say ARM aarch64):"
+        file build/libmimalloc.so
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: mimalloc-cortex-a53-release
+        path: |
+          build/libmimalloc.so
+          build/libmimalloc.a
+          build/libmimalloc-secure.so
+          build/libmimalloc-secure.a
