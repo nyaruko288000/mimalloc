@@ -1,4 +1,4 @@
-name: Build Mimalloc (Safe Mode)
+name: Build Mimalloc (GCC + Compatible TLS)
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-safe:
+  build-gcc-safe:
     runs-on: ubuntu-latest
     container: ubuntu:20.04
     
@@ -23,74 +23,69 @@ jobs:
     - name: Checkout Source Code
       uses: actions/checkout@v4
 
-    - name: Install Build Tools & Upgrade CMake
+    - name: Install GCC Cross Compiler & CMake
       run: |
         apt-get update
-        apt-get install -yq python3-pip clang lld ninja-build \
+        # 安装 GCC 交叉编译器
+        apt-get install -yq python3-pip ninja-build \
           gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-          libc6-dev-arm64-cross binutils
+          binutils
 
+        # 升级 CMake
         pip3 install cmake --upgrade
 
-    - name: Build with CMake (Safe Flags)
+    - name: Build with GCC
       run: |
         mkdir -p build
         cd build
         
-        # === 核心修改：安全保守模式 ===
-        # 1. -O2 : 比 O3 更稳，不容易产生非法指令
-        # 2. -march=armv8-a : 使用最通用的 ARMv8 指令集，不使用 A53 特性
-        # 3. 移除了 -flto, -funroll-loops 等激进优化
-        COMMON_FLAGS="-I/usr/aarch64-linux-gnu/include \
-          -O2 \
+        # === GCC 专用保守参数 ===
+        # 1. -ftls-model=global-dynamic : 解决非法指令的关键！防止 initial-exec 崩溃
+        # 2. -fno-builtin-malloc : 防止编译器自作聪明
+        COMMON_FLAGS="-O2 \
           -march=armv8-a \
-          -mtune=generic \
-          -fomit-frame-pointer \
-          -DNDEBUG \
-          -fvisibility=hidden \
-          -fno-math-errno \
-          -Wno-unused-command-line-argument"
+          -mtune=cortex-a53 \
+          -ftls-model=global-dynamic \
+          -fno-builtin-malloc \
+          -fno-builtin-calloc \
+          -fno-builtin-realloc \
+          -fno-builtin-free \
+          -fvisibility=hidden"
         
-        MY_C_FLAGS="$COMMON_FLAGS -std=gnu17"
-        MY_CXX_FLAGS="$COMMON_FLAGS"
-          
-        # 链接器也去掉 LTO
-        MY_LDFLAGS="-L/usr/aarch64-linux-gnu/lib \
-          -fuse-ld=lld \
-          -Wl,-O2 -Wl,--icf=all -Wl,-z,relro,-z,now -s"
-
+        # GCC 不需要像 Clang 那样手动指定 -I / -L，它自己知道去哪找
+        
         cmake .. \
           -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_SYSTEM_NAME=Linux \
           -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-          -DCMAKE_C_COMPILER=clang \
-          -DCMAKE_CXX_COMPILER=clang++ \
-          -DCMAKE_C_COMPILER_TARGET=aarch64-linux-gnu \
-          -DCMAKE_CXX_COMPILER_TARGET=aarch64-linux-gnu \
-          -DCMAKE_C_FLAGS="$MY_C_FLAGS" \
-          -DCMAKE_CXX_FLAGS="$MY_CXX_FLAGS" \
-          -DCMAKE_EXE_LINKER_FLAGS="$MY_LDFLAGS" \
-          -DCMAKE_SHARED_LINKER_FLAGS="$MY_LDFLAGS" \
-          -DCMAKE_MODULE_LINKER_FLAGS="$MY_LDFLAGS" \
+          -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+          -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+          -DCMAKE_C_FLAGS="$COMMON_FLAGS -std=gnu11" \
+          -DCMAKE_CXX_FLAGS="$COMMON_FLAGS" \
           -DMI_BUILD_TESTS=OFF \
           -DMI_BUILD_SHARED=ON \
           -DMI_BUILD_STATIC=ON \
-          -DMI_OVERRIDE=ON
+          -DMI_OVERRIDE=ON \
+          -DMI_USE_CXX=OFF \
+          -DMI_SEE_ASM=OFF
 
     - name: Compile
       run: |
         cd build
         ninja -v
 
-    - name: Verify
+    - name: Check
       run: |
         echo "架构检查："
         file build/libmimalloc.so
+        echo "符号检查 (确认没有 LSE 原子指令)："
+        # 这一步只是为了确认，如果 grep 有输出说明有危险指令
+        objdump -d build/libmimalloc.so | grep -E "casal|ldadd|stadd" | head -n 5 || echo "Safe: No LSE atomics found."
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: mimalloc-safe-mode
+        name: mimalloc-gcc-compatible
         path: |
           build/libmimalloc.so
