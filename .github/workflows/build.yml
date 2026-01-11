@@ -1,4 +1,4 @@
-name: Build Mimalloc for Cortex-A53 (Final Fix)
+name: Build Mimalloc (Strict GLIBC 2.31 Compatible)
 
 on:
   push:
@@ -6,25 +6,39 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-arm64:
-    runs-on: ubuntu-24.04
-    
+  build-legacy:
+    # 关键点：虽然宿主机是最新版，但我们强行进入 Ubuntu 20.04 容器内部工作
+    # 这样生成的 so 文件就是基于 GLIBC 2.31 的，完美匹配你的盒子
+    runs-on: ubuntu-latest
+    container: ubuntu:20.04
+
     steps:
+    - name: Install Git and Essentials (Container Prep)
+      run: |
+        # 容器内通常是最小化安装，先装 git 和 wget 以便 checkout 能工作
+        apt-get update
+        apt-get install -y git wget software-properties-common
+
     - name: Checkout Source Code
       uses: actions/checkout@v4
 
-    - name: Install Dependencies
+    - name: Install Build Tools
       run: |
-        sudo apt-get update
-        sudo apt-get install -y clang lld ninja-build cmake gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+        apt-get update
+        # 安装 Clang, LLD, CMake, Ninja 和 ARM64 交叉编译包
+        # Ubuntu 20.04 默认源里的 Clang 版本较老(v10)，但足够稳定
+        apt-get install -y clang lld ninja-build cmake \
+          gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+          binutils
 
     - name: Build with CMake
       run: |
         mkdir -p build
         cd build
         
-        # === 1. 定义通用优化参数 (C 和 C++ 都能用的) ===
-        # 注意：这里不包含 -std=gnu17
+        # === 优化参数 (适配 Clang 10/11) ===
+        # 移除了 Polly (旧版 Clang 支持不好容易报错)
+        # 保留核心 Cortex-A53 优化和 LTO
         COMMON_FLAGS="-O3 -mcpu=cortex-a53 -mtune=cortex-a53 \
           -flto=full \
           -fstack-protector-strong \
@@ -33,26 +47,14 @@ jobs:
           -fomit-frame-pointer -DNDEBUG \
           -fvisibility=hidden -fvisibility-inlines-hidden \
           -falign-functions=32 \
-          -fno-semantic-interposition \
           -fno-math-errno \
-          -mllvm -polly -mllvm -polly-vectorizer=stripmine \
-          -mllvm -inline-threshold=1200 \
-          -mllvm -unroll-threshold=400 \
-          -mllvm -enable-loop-distribute \
           -Wno-unused-command-line-argument"
         
-        # === 2. 定义 C 语言专用参数 ===
-        # 这里加上 -std=gnu17
         MY_C_FLAGS="$COMMON_FLAGS -std=gnu17"
-        
-        # === 3. 定义 C++ 语言专用参数 ===
-        # C++ 不可以使用 -std=gnu17，我们让它使用默认标准，或者你可以指定 -std=gnu++17
         MY_CXX_FLAGS="$COMMON_FLAGS"
           
         MY_LDFLAGS="-flto=full -fuse-ld=lld -Wl,-O3 -Wl,--icf=all -Wl,-z,relro,-z,now -s"
 
-        # === 4. 运行 CMake ===
-        # 关键点：分别传入 C_FLAGS 和 CXX_FLAGS
         cmake .. \
           -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
@@ -77,15 +79,18 @@ jobs:
         cd build
         ninja -v
 
-    - name: Verify Architecture
+    - name: Verify GLIBC Version
       run: |
-        echo "检查文件架构（必须显示 ARM aarch64）："
+        echo "检查生成的库文件依赖版本（不应出现 GLIBC_2.32 及以上）："
+        # objdump 需要 binutils 包
+        objdump -p build/libmimalloc.so | grep "GLIBC_2." | sort -u
+        echo "------------------------------------------------"
+        echo "文件架构检查："
         file build/libmimalloc.so
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: mimalloc-cortex-a53-release
+        name: mimalloc-glibc2.31-compatible
         path: |
           build/libmimalloc.so
-          build/libmimalloc.a
