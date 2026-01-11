@@ -1,4 +1,4 @@
-name: Build Mimalloc (Clang Cross Fix)
+name: Build Mimalloc (Safe Mode)
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-legacy-fixed:
+  build-safe:
     runs-on: ubuntu-latest
     container: ubuntu:20.04
     
@@ -26,42 +26,38 @@ jobs:
     - name: Install Build Tools & Upgrade CMake
       run: |
         apt-get update
-        # 1. 显式安装 libc6-dev-arm64-cross 确保头文件绝对存在
         apt-get install -yq python3-pip clang lld ninja-build \
           gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
           libc6-dev-arm64-cross binutils
 
-        # 2. 升级 CMake
         pip3 install cmake --upgrade
 
-    - name: Build with CMake
+    - name: Build with CMake (Safe Flags)
       run: |
         mkdir -p build
         cd build
         
-        # === 核心修复 ===
-        # 1. -I/usr/aarch64-linux-gnu/include : 手动指定 ARM 头文件路径，解决 "bits/libc-header-start.h not found"
-        # 2. 移除了 polly (以防万一)，保留 cortex-a53 优化
+        # === 核心修改：安全保守模式 ===
+        # 1. -O2 : 比 O3 更稳，不容易产生非法指令
+        # 2. -march=armv8-a : 使用最通用的 ARMv8 指令集，不使用 A53 特性
+        # 3. 移除了 -flto, -funroll-loops 等激进优化
         COMMON_FLAGS="-I/usr/aarch64-linux-gnu/include \
-          -O3 -mcpu=cortex-a53 -mtune=cortex-a53 \
-          -flto=full \
-          -fstack-protector-strong \
-          -funroll-loops \
-          -fno-plt \
-          -fomit-frame-pointer -DNDEBUG \
-          -fvisibility=hidden -fvisibility-inlines-hidden \
-          -falign-functions=32 \
+          -O2 \
+          -march=armv8-a \
+          -mtune=generic \
+          -fomit-frame-pointer \
+          -DNDEBUG \
+          -fvisibility=hidden \
           -fno-math-errno \
           -Wno-unused-command-line-argument"
         
         MY_C_FLAGS="$COMMON_FLAGS -std=gnu17"
         MY_CXX_FLAGS="$COMMON_FLAGS"
           
-        # === 链接修复 ===
-        # -L/usr/aarch64-linux-gnu/lib : 手动指定库路径，替代 --sysroot，防止路径重叠报错
+        # 链接器也去掉 LTO
         MY_LDFLAGS="-L/usr/aarch64-linux-gnu/lib \
-          -flto=full -fuse-ld=lld \
-          -Wl,-O3 -Wl,--icf=all -Wl,-z,relro,-z,now -s"
+          -fuse-ld=lld \
+          -Wl,-O2 -Wl,--icf=all -Wl,-z,relro,-z,now -s"
 
         cmake .. \
           -G Ninja \
@@ -89,14 +85,12 @@ jobs:
 
     - name: Verify
       run: |
-        echo "=== GLIBC Requirement ==="
-        objdump -p build/libmimalloc.so | grep "GLIBC_2." | sort -u
-        echo "=== Architecture ==="
+        echo "架构检查："
         file build/libmimalloc.so
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: mimalloc-glibc2.31-fixed
+        name: mimalloc-safe-mode
         path: |
           build/libmimalloc.so
