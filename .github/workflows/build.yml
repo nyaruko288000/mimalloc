@@ -1,4 +1,4 @@
-name: Build Mimalloc (Strict GLIBC 2.31 Compatible)
+name: Build Mimalloc (GLIBC 2.31 Fixed)
 
 on:
   push:
@@ -7,17 +7,21 @@ on:
 
 jobs:
   build-legacy:
-    # 关键点：虽然宿主机是最新版，但我们强行进入 Ubuntu 20.04 容器内部工作
-    # 这样生成的 so 文件就是基于 GLIBC 2.31 的，完美匹配你的盒子
     runs-on: ubuntu-latest
     container: ubuntu:20.04
+    
+    # === 关键修复：添加这两行环境变量 ===
+    # 这会告诉 apt-get 闭嘴，不要弹出任何蓝色的选择框
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Asia/Shanghai
 
     steps:
     - name: Install Git and Essentials (Container Prep)
       run: |
-        # 容器内通常是最小化安装，先装 git 和 wget 以便 checkout 能工作
         apt-get update
-        apt-get install -y git wget software-properties-common
+        # -yq 表示 yes 和 quiet，配合环境变量彻底静默安装
+        apt-get install -yq git wget software-properties-common tzdata
 
     - name: Checkout Source Code
       uses: actions/checkout@v4
@@ -25,9 +29,7 @@ jobs:
     - name: Install Build Tools
       run: |
         apt-get update
-        # 安装 Clang, LLD, CMake, Ninja 和 ARM64 交叉编译包
-        # Ubuntu 20.04 默认源里的 Clang 版本较老(v10)，但足够稳定
-        apt-get install -y clang lld ninja-build cmake \
+        apt-get install -yq clang lld ninja-build cmake \
           gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
           binutils
 
@@ -36,9 +38,7 @@ jobs:
         mkdir -p build
         cd build
         
-        # === 优化参数 (适配 Clang 10/11) ===
-        # 移除了 Polly (旧版 Clang 支持不好容易报错)
-        # 保留核心 Cortex-A53 优化和 LTO
+        # 针对 Cortex-A53 的优化参数
         COMMON_FLAGS="-O3 -mcpu=cortex-a53 -mtune=cortex-a53 \
           -flto=full \
           -fstack-protector-strong \
@@ -81,10 +81,8 @@ jobs:
 
     - name: Verify GLIBC Version
       run: |
-        echo "检查生成的库文件依赖版本（不应出现 GLIBC_2.32 及以上）："
-        # objdump 需要 binutils 包
+        echo "检查 GLIBC 依赖："
         objdump -p build/libmimalloc.so | grep "GLIBC_2." | sort -u
-        echo "------------------------------------------------"
         echo "文件架构检查："
         file build/libmimalloc.so
 
