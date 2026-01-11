@@ -1,4 +1,4 @@
-name: Build Mimalloc (GLIBC 2.31 Fixed)
+name: Build Mimalloc (GLIBC 2.31 + New CMake)
 
 on:
   push:
@@ -10,35 +10,39 @@ jobs:
     runs-on: ubuntu-latest
     container: ubuntu:20.04
     
-    # === 关键修复：添加这两行环境变量 ===
-    # 这会告诉 apt-get 闭嘴，不要弹出任何蓝色的选择框
     env:
       DEBIAN_FRONTEND: noninteractive
       TZ: Asia/Shanghai
 
     steps:
-    - name: Install Git and Essentials (Container Prep)
+    - name: Install Git and Essentials
       run: |
         apt-get update
-        # -yq 表示 yes 和 quiet，配合环境变量彻底静默安装
         apt-get install -yq git wget software-properties-common tzdata
 
     - name: Checkout Source Code
       uses: actions/checkout@v4
 
-    - name: Install Build Tools
+    - name: Install Build Tools & Upgrade CMake
       run: |
         apt-get update
-        apt-get install -yq clang lld ninja-build cmake \
+        # 1. 安装 Python pip 和编译工具 (注意：这里不安装 apt 里的 cmake)
+        apt-get install -yq python3-pip clang lld ninja-build \
           gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
           binutils
+
+        # 2. 使用 pip 安装最新版 CMake (这一步解决了 3.16 版本过低的问题)
+        pip3 install cmake --upgrade
+        
+        # 3. 验证版本
+        echo "CMake Version:"
+        cmake --version
 
     - name: Build with CMake
       run: |
         mkdir -p build
         cd build
         
-        # 针对 Cortex-A53 的优化参数
         COMMON_FLAGS="-O3 -mcpu=cortex-a53 -mtune=cortex-a53 \
           -flto=full \
           -fstack-protector-strong \
@@ -79,11 +83,11 @@ jobs:
         cd build
         ninja -v
 
-    - name: Verify GLIBC Version
+    - name: Verify GLIBC & Arch
       run: |
-        echo "检查 GLIBC 依赖："
+        echo "=== GLIBC Requirement (Should satisfy GLIBC 2.31) ==="
         objdump -p build/libmimalloc.so | grep "GLIBC_2." | sort -u
-        echo "文件架构检查："
+        echo "=== Architecture (Should be aarch64) ==="
         file build/libmimalloc.so
 
     - name: Upload Artifacts
